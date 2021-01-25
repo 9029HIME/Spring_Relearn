@@ -1,4 +1,4 @@
-package com.genn.config;
+package com.ioc.config;
 
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanPostProcessor;

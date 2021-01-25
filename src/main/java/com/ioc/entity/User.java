@@ -1,4 +1,4 @@
-package com.genn.entity;
+package com.ioc.entity;
 
 import org.springframework.stereotype.Component;
 

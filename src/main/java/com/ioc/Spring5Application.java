@@ -1,4 +1,4 @@
-package com.genn;
+package com.ioc;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
