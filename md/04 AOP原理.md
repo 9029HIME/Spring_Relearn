@@ -274,4 +274,184 @@ protected Object applyBeanPostProcessorsBeforeInstantiation(Class<?> beanClass, 
 
 ​	InstantiationAwareBeanPostProcessor：在**创建bean对象bean对象前**被尝试调用，用来返回一个代理对象。如果成功返回不为null，则不会调用到BeanPostProcessor了。
 
-​	所以接下来，就要看看AnnotationAwareAspectJAutoProxyCreator的postProcessBeforeInstantiation()到底做了啥？
+​	所以接下来，就要看看AnnotationAwareAspectJAutoProxyCreator的postProcessBeforeInstantiation()到底做了啥？这里先看postProcessBeforeInstantiation()
+
+```java
+public Object postProcessBeforeInstantiation(Class<?> beanClass, String beanName) {
+    // 拿到被处理后的beanName
+    Object cacheKey = this.getCacheKey(beanClass, beanName);
+    if (!StringUtils.hasLength(beanName) || !this.targetSourcedBeans.contains(beanName)) {
+        	// 判断这个bean已经历过增强步骤？ 
+        if (this.advisedBeans.containsKey(cacheKey)) {
+            return null;
+        }
+		// 判断这个bean是否实现了Advice，Pointcut，Advisor，AopInfrastructureBean，以及bean是否为切面    	||	应该跳过？ 如果是被切点的类，两个判断都为false，这里不会进if。
+        if (this.isInfrastructureClass(beanClass) || this.shouldSkip(beanClass, beanName)) {
+            this.advisedBeans.put(cacheKey, Boolean.FALSE);
+            return null;
+        }
+    }
+
+    TargetSource targetSource = this.getCustomTargetSource(beanClass, beanName);
+    if (targetSource != null) {
+        if (StringUtils.hasLength(beanName)) {
+            this.targetSourcedBeans.add(beanName);
+        }
+
+        Object[] specificInterceptors = this.getAdvicesAndAdvisorsForBean(beanClass, beanName, targetSource);
+        Object proxy = this.createProxy(beanClass, beanName, specificInterceptors, targetSource);
+        this.proxyTypes.put(cacheKey, proxy.getClass());
+        return proxy;
+    } else {
+        return null;
+    }
+}
+```
+
+```java
+protected boolean shouldSkip(Class<?> beanClass, String beanName) {
+    // 找到候选的增强器，增强器即"通知与切面"
+    List<Advisor> candidateAdvisors = this.findCandidateAdvisors();
+    Iterator var4 = candidateAdvisors.iterator();
+
+    Advisor advisor;
+    do {
+        if (!var4.hasNext()) {
+            // 如果没有一个增强器符合下面的条件，直接判断beanName是否为beanClass的名字+.ORIGINAL
+            return super.shouldSkip(beanClass, beanName);
+        }
+        advisor = (Advisor)var4.next();
+        // 增强器是否为AspectJPointcutAdvisor ||  增强器的aspectName是否为bean的名字
+    } while(!(advisor instanceof AspectJPointcutAdvisor) || !((AspectJPointcutAdvisor)advisor).getAspectName().equals(beanName));
+		
+    return true;
+}
+```
+
+​	如果是被切点的类的话，postProcessBeforeInstantiation直接return了null，被切点类的对象在创建时会老老实实走doCreateBean()了，此时会进入applyBeanPostProcessorsAfterInitialization()，即调用所有BeanPostProcessors的postProcessAfterInitialization()方法，**这里就用到了AbstractAutoProxyCreator.postProcessAfterInitialization()**。
+
+```java
+public Object postProcessAfterInitialization(@Nullable Object bean, String beanName) {
+    if (bean != null) {
+        // 老样子 获取bean的名字
+        Object cacheKey = this.getCacheKey(bean.getClass(), beanName);
+        if (this.earlyProxyReferences.remove(cacheKey) != bean) {
+            // 如果这个bean之前没有被代理过的话，就看下是否有必要包装
+            return this.wrapIfNecessary(bean, beanName, cacheKey);
+        }
+    }
+
+    return bean;
+}
+```
+
+```java
+protected Object wrapIfNecessary(Object bean, String beanName, Object cacheKey) {
+    if (StringUtils.hasLength(beanName) && this.targetSourcedBeans.contains(beanName)) {
+        return bean;
+        // 前面判断过
+    } else if (Boolean.FALSE.equals(this.advisedBeans.get(cacheKey))) {
+        return bean;
+        // 前面也判断过，不过这里取反了，所以会进这个分支
+    } else if (!this.isInfrastructureClass(bean.getClass()) && !this.shouldSkip(bean.getClass(), beanName)) {
+        // 获取这个bean的通知与切面（增强器）
+        Object[] specificInterceptors = this.getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, (TargetSource)null);
+        // 如果有增强器，进入创建代理对象
+        if (specificInterceptors != DO_NOT_PROXY) {
+            // 加入到需要增强的bean集合里，值为true，即已经历过增强步骤，成功了
+            this.advisedBeans.put(cacheKey, Boolean.TRUE);
+            // 创建代理对象
+            Object proxy = this.createProxy(bean.getClass(), beanName, specificInterceptors, new SingletonTargetSource(bean));
+            this.proxyTypes.put(cacheKey, proxy.getClass());
+            return proxy;
+            // 如果没有增强器，加入到需要增强的bean集合里，但值为false，即已经历过增强步骤，但失败了
+        } else {
+            this.advisedBeans.put(cacheKey, Boolean.FALSE);
+            return bean;
+        }
+    } else {
+        this.advisedBeans.put(cacheKey, Boolean.FALSE);
+        return bean;
+    }
+}
+```
+
+​	所以说，如果这里是要创建被切点对象，应该通过getAdvicesAndAdvisorsForBean()找到这个被切点类的通知（@after等）与切面（增强方法），这里看下如何获取的？
+
+```java
+@Nullable
+protected Object[] getAdvicesAndAdvisorsForBean(Class<?> beanClass, String beanName, @Nullable TargetSource targetSource) {
+    List<Advisor> advisors = this.findEligibleAdvisors(beanClass, beanName);
+    return advisors.isEmpty() ? DO_NOT_PROXY : advisors.toArray();
+}
+```
+
+​	看起来还封装了一层，真正有用的还是findEligibleAdvisors()
+
+```java
+protected List<Advisor> findEligibleAdvisors(Class<?> beanClass, String beanName) {
+    // 先找到所有增强器
+    List<Advisor> candidateAdvisors = this.findCandidateAdvisors();
+    // 在调用findAdvisorsThatCanApply()，查找所有增强器中可以应用到beanClass的增强器（这里我猜是解析@Pointcut(value)）
+    List<Advisor> eligibleAdvisors = this.findAdvisorsThatCanApply(candidateAdvisors, beanClass, beanName);
+    // TODO 这里还不清楚
+    this.extendAdvisors(eligibleAdvisors);
+    
+    if (!eligibleAdvisors.isEmpty()) {
+		// 排个序
+        eligibleAdvisors = this.sortAdvisors(eligibleAdvisors);
+    }
+
+    return eligibleAdvisors;
+}
+```
+
+​	最后看一下创建代理对象的方法createProxy()
+
+```java
+protected Object createProxy(Class<?> beanClass, @Nullable String beanName, @Nullable Object[] specificInterceptors, TargetSource targetSource) {
+    if (this.beanFactory instanceof ConfigurableListableBeanFactory) {
+        AutoProxyUtils.exposeTargetClass((ConfigurableListableBeanFactory)this.beanFactory, beanName, beanClass);
+    }
+	// 获取代理工厂
+    ProxyFactory proxyFactory = new ProxyFactory();
+    proxyFactory.copyFrom(this);
+    if (!proxyFactory.isProxyTargetClass()) {
+        if (this.shouldProxyTargetClass(beanClass, beanName)) {
+            proxyFactory.setProxyTargetClass(true);
+        } else {
+            this.evaluateProxyInterfaces(beanClass, proxyFactory);
+        }
+    }
+
+    Advisor[] advisors = this.buildAdvisors(beanName, specificInterceptors);
+    proxyFactory.addAdvisors(advisors);
+    proxyFactory.setTargetSource(targetSource);
+    this.customizeProxyFactory(proxyFactory);
+    proxyFactory.setFrozen(this.freezeProxy);
+    if (this.advisorsPreFiltered()) {
+        proxyFactory.setPreFiltered(true);
+    }
+	//用代理工厂为beanClass创建代理对象
+    return proxyFactory.getProxy(this.getProxyClassLoader());
+}
+```
+
+​	到了这里，会分为两步走：1.用createAopProxy()创建一个AopProxy，2.用AopProxy的getProxy()为该bean创建代理对象。但是AopProxy有两种实现：1.cglib 2.jdk原生代理对象，具体是哪种要看spring的决定，一般来说没有接口实现的类用的是cglib，反之则是原生代理，当然也可以强制使用cglib。
+
+```java
+public AopProxy createAopProxy(AdvisedSupport config) throws AopConfigException {
+    if (IN_NATIVE_IMAGE || !config.isOptimize() && !config.isProxyTargetClass() && !this.hasNoUserSuppliedProxyInterfaces(config)) {
+        return new JdkDynamicAopProxy(config);
+    } else {
+        Class<?> targetClass = config.getTargetClass();
+        if (targetClass == null) {
+            throw new AopConfigException("TargetSource cannot determine target class: Either an interface or a target is required for proxy creation.");
+        } else {
+            return (AopProxy)(!targetClass.isInterface() && !Proxy.isProxyClass(targetClass) ? new ObjenesisCglibAopProxy(config) : new JdkDynamicAopProxy(config));
+        }
+    }
+}
+```
+
+​	
