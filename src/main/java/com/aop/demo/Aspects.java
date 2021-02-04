@@ -59,23 +59,23 @@ public class Aspects {
     /*
     定义环绕通知，环绕通知的切面需要声明参数ProceedingJoinPoint pjp，调用pjp的方法pjp.process()可以直接调用切点
      */
-    @Around("plusCut()")
-    public Object around(ProceedingJoinPoint pjp){
-        //获取切面方法的参数
-        Object[] args = pjp.getArgs();
-        Object proceed = null;
-        try {
-            System.out.println("plus方法调用前的前置通知");
-            proceed  = pjp.proceed(args);
-            System.out.println("plus方法返回后的返回通知，返回值为："+(Integer)proceed);
-        } catch (Throwable throwable) {
-            throwable.printStackTrace();
-            System.out.println("plus方法触发异常后的异常通知");
-        }
-        System.out.println("plus方法调用后的后置通知");
-        return proceed;
-    }
-
+//    @Around("plusCut()")
+//    public Object around(ProceedingJoinPoint pjp){
+//        //获取切面方法的参数
+//        Object[] args = pjp.getArgs();
+//        Object proceed = null;
+//        try {
+//            System.out.println("plus方法调用前的前置通知");
+//            proceed  = pjp.proceed(args);
+//            System.out.println("plus方法返回后的返回通知，返回值为："+(Integer)proceed);
+//        } catch (Throwable throwable) {
+//            throwable.printStackTrace();
+//            System.out.println("plus方法触发异常后的异常通知");
+//        }
+//        System.out.println("plus方法调用后的后置通知");
+//        return proceed;
+//    }
+//
 
 
 }

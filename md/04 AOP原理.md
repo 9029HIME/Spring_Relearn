@@ -454,4 +454,211 @@ public AopProxy createAopProxy(AdvisedSupport config) throws AopConfigException 
 }
 ```
 
-​	
+​	这么看来，@EnableAspectJProxy最关键的还是引入了AbstractAutoProxyCreator这个处理器，并调用了postProcessAfterInitialization()这个方法来创建增强后的代理对象。
+
+
+
+# 代理对象的方法执行流程
+
+​	既然前面已经用AOP创建了一个代理对象，那么还得看看调用了代理对象的方法后，到底经历了哪些步骤。总体来看可以分为两步：1.获取拦截器链，2.根据拦截器链调度被切方法。
+
+## 获取拦截器链
+
+​	以cglib代理方式为例，调用代理对象的方法时，会被CglibAopProxy.intercept()拦截到。
+
+```java
+public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+    Object oldProxy = null;
+    boolean setProxyContext = false;
+    Object target = null;
+    TargetSource targetSource = this.advised.getTargetSource();
+
+    Object var16;
+    try {
+        if (this.advised.exposeProxy) {
+            oldProxy = AopContext.setCurrentProxy(proxy);
+            setProxyContext = true;
+        }
+
+        target = targetSource.getTarget();
+        Class<?> targetClass = target != null ? target.getClass() : null;
+        // 关键步骤1 ：根据ProxyFactory获取拦截器链
+        List<Object> chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);
+        Object retVal;
+        // 如果拦截器为空，即这个方法没有被切
+        if (chain.isEmpty() && Modifier.isPublic(method.getModifiers())) {
+            Object[] argsToUse = AopProxyUtils.adaptArgumentsIfNecessary(method, args);
+            // 调用原生方法
+            retVal = methodProxy.invoke(target, argsToUse);
+        } else {
+            // 关键步骤2：根据拦截器、代理对象、方法、参数等条件创建一个CglibMethodInvocation，并调用方法。
+            retVal = (new CglibAopProxy.CglibMethodInvocation(proxy, target, method, args, targetClass, chain, methodProxy)).proceed();
+        }
+
+        retVal = CglibAopProxy.processReturnType(proxy, target, method, retVal);
+        var16 = retVal;
+    } finally {
+        if (target != null && !targetSource.isStatic()) {
+            targetSource.releaseTarget(target);
+        }
+
+        if (setProxyContext) {
+            AopContext.setCurrentProxy(oldProxy);
+        }
+
+    }
+
+    return var16;
+}
+```
+
+​	先看一下拦截器是怎么获取的
+
+```java
+public List<Object> getInterceptorsAndDynamicInterceptionAdvice(Method method, @Nullable Class<?> targetClass) {
+    AdvisedSupport.MethodCacheKey cacheKey = new AdvisedSupport.MethodCacheKey(method);
+    List<Object> cached = (List)this.methodCache.get(cacheKey);
+    // 一般第一次获取是为null的
+    if (cached == null) {
+        cached = this.advisorChainFactory.getInterceptorsAndDynamicInterceptionAdvice(this, method, targetClass);
+        // 获取了方法的拦截器后，将它放入缓存中，以方法为Key
+        this.methodCache.put(cacheKey, cached);
+    }
+
+    return cached;
+}
+```
+
+```java
+public List<Object> getInterceptorsAndDynamicInterceptionAdvice(Advised config, Method method, @Nullable Class<?> targetClass) {
+    AdvisorAdapterRegistry registry = GlobalAdvisorAdapterRegistry.getInstance();
+    // 这里的config其实是AOP工厂，通过Config获取所有的增强器
+    Advisor[] advisors = config.getAdvisors();
+    // 存放结果的list
+    List<Object> interceptorList = new ArrayList(advisors.length);
+    Class<?> actualClass = targetClass != null ? targetClass : method.getDeclaringClass();
+    Boolean hasIntroductions = null;
+    Advisor[] var9 = advisors;
+    int var10 = advisors.length;
+
+    // 遍历所有config获取的增强器
+    for(int var11 = 0; var11 < var10; ++var11) {
+        Advisor advisor = var9[var11];
+        // 如果增强器是PointcutAdvisor
+        if (advisor instanceof PointcutAdvisor) {
+            PointcutAdvisor pointcutAdvisor = (PointcutAdvisor)advisor;
+            if (config.isPreFiltered() || pointcutAdvisor.getPointcut().getClassFilter().matches(actualClass)) {
+                MethodMatcher mm = pointcutAdvisor.getPointcut().getMethodMatcher();
+                boolean match;
+                // 如果即是PointcutAdvisor 也是 IntroductionAwareMethodMatcher
+                if (mm instanceof IntroductionAwareMethodMatcher) {
+                    if (hasIntroductions == null) {
+                        hasIntroductions = hasMatchingIntroductions(advisors, actualClass);
+                    }
+				// 用来看增强器与目标方法是否配对（是否切入的是该方法）
+                    match = ((IntroductionAwareMethodMatcher)mm).matches(method, actualClass, hasIntroductions);
+                } else {
+                    // 用来看增强器与目标方法是否配对（是否切入的是该方法）
+                    match = mm.matches(method, actualClass);
+                }
+				// 如果增强器和目标方法配对
+                if (match) {
+                    // 将增强器转为MethodInterceptor
+                    MethodInterceptor[] interceptors = registry.getInterceptors(advisor);
+                    if (mm.isRuntime()) {
+                        MethodInterceptor[] var17 = interceptors;
+                        int var18 = interceptors.length;
+
+                        for(int var19 = 0; var19 < var18; ++var19) {
+                            MethodInterceptor interceptor = var17[var19];
+                            // 最后将转换好的MethodInterceptor加入到结果集合里
+                            interceptorList.add(new InterceptorAndDynamicMethodMatcher(interceptor, mm));
+                        }
+                    } else {
+                        // 最后将转换好的MethodInterceptor加入到结果集合里
+                        interceptorList.addAll(Arrays.asList(interceptors));
+                    }
+                }
+            }
+            // 如果增强器是IntroductionAdvisor
+        } else if (advisor instanceof IntroductionAdvisor) {
+            IntroductionAdvisor ia = (IntroductionAdvisor)advisor;
+            if (config.isPreFiltered() || ia.getClassFilter().matches(actualClass)) {
+                // 做转换，并加入到结果集合里
+                Interceptor[] interceptors = registry.getInterceptors(advisor);
+                interceptorList.addAll(Arrays.asList(interceptors));
+            }
+        } else {
+            // 做转换，并加入到结果集合里
+            Interceptor[] interceptors = registry.getInterceptors(advisor);
+            interceptorList.addAll(Arrays.asList(interceptors));
+        }
+    }
+	// 最终返回结果
+    return interceptorList;
+}
+```
+
+​	可以看到获取的拦截器链主要是将增强器通过registry.getInterceptors()转为Interceptor集合，最后返回，拦截器链本质也只是一个Interceptor集合，接下来就得看看getInterceptors()是怎么将增强器转为拦截器的。
+
+```java
+public MethodInterceptor[] getInterceptors(Advisor advisor) throws UnknownAdviceTypeException {
+    List<MethodInterceptor> interceptors = new ArrayList(3);
+    Advice advice = advisor.getAdvice();
+    // 如果增强器本身就是MethodInterceptor，直接强转并加入
+    if (advice instanceof MethodInterceptor) {
+        interceptors.add((MethodInterceptor)advice);
+    }
+
+    Iterator var4 = this.adapters.iterator();
+
+    // 遍历所有适配器
+    while(var4.hasNext()) {
+        AdvisorAdapter adapter = (AdvisorAdapter)var4.next();
+        //如果适配器能够适配这个增强器，则用适配器将增强器转为MethodInterceptor并加入(其实就是看增强器是不是适配器的派生)
+        if (adapter.supportsAdvice(advice)) {
+            interceptors.add(adapter.getInterceptor(advisor));
+        }
+    }
+
+    if (interceptors.isEmpty()) {
+        throw new UnknownAdviceTypeException(advisor.getAdvice());
+    } else {
+        return (MethodInterceptor[])interceptors.toArray(new MethodInterceptor[0]);
+    }
+}
+```
+
+​	除了**注册器**的getInterceptor(增强器)外，还有**适配器**的getInterceptor(增强器)，一共有三个适配器，看一下这三个适配器到底做了什么。
+
+​	AfterReturningAdviceAdapter：
+
+```java
+public MethodInterceptor getInterceptor(Advisor advisor) {
+    AfterReturningAdvice advice = (AfterReturningAdvice)advisor.getAdvice();
+    return new AfterReturningAdviceInterceptor(advice);
+}
+```
+
+​	MethodBeforeAdviceAdapter：
+
+```java
+public MethodInterceptor getInterceptor(Advisor advisor) {
+    MethodBeforeAdvice advice = (MethodBeforeAdvice)advisor.getAdvice();
+    return new MethodBeforeAdviceInterceptor(advice);
+}
+```
+
+​	ThrowsAdviceAdapter：
+
+```java
+public MethodInterceptor getInterceptor(Advisor advisor) {
+    return new ThrowsAdviceInterceptor(advisor.getAdvice());
+}
+```
+
+​	这三个适配器都是**MethodInterceptor的派生**，所谓getInterceptor()只是将不属于MethodInterceptor的Advice(增强器类型)包装为这三个适配器的其中一种，然后返回。
+
+## 执行拦截器链
+
+​	上面解释了如何从增强器 → 获取拦截器后，接下来就要基于拦截器链对目标方法进行拦截调用。
